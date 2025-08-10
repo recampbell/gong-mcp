@@ -61,6 +61,64 @@ interface GongRetrieveTranscriptsResponse {
   transcripts: GongTranscript[];
 }
 
+interface GongCallDetails {
+  id: string;
+  metaData: {
+    id: string;
+    url: string;
+    title: string;
+    scheduled?: string;
+    started?: string;
+    duration?: number;
+    primaryUserId: string;
+    direction?: string;
+    system?: string;
+    scope?: string;
+    media?: string;
+    language?: string;
+    workspaceId: string;
+  };
+  content: {
+    pointsOfInterest?: any[];
+    topics?: any[];
+    trackers?: any[];
+    structure?: any;
+    outline?: any[];
+  };
+  parties?: any[];
+  collaboration?: any;
+  interaction?: {
+    speakers?: any[];
+    personInteractionStats?: any[];
+    questions?: any[];
+    video?: any;
+  };
+  media?: {
+    audioUrl?: string;
+    videoUrl?: string;
+    duration?: number;
+  };
+  context?: {
+    crm?: {
+      crmSystem?: string;
+      crmId?: string;
+      crmName?: string;
+      crmUrl?: string;
+    };
+  };
+}
+
+interface GongRetrieveCallDetailsResponse {
+  requestId?: string;
+  records?: {
+    totalRecords: number;
+    currentPageSize: number;
+    currentPageNumber: number;
+  };
+  calls: GongCallDetails[];
+  cursor?: string;
+}
+
 interface GongListCallsArgs {
   [key: string]: string | undefined;
   fromDateTime?: string;
@@ -69,6 +127,15 @@ interface GongListCallsArgs {
 
 interface GongRetrieveTranscriptsArgs {
   callIds: string[];
+}
+
+interface GongRetrieveCallDetailsArgs {
+  callIds?: string[];
+  fromDateTime?: string;
+  toDateTime?: string;
+  primaryUserIds?: string[];
+  context?: string;
+  cursor?: string;
 }
 
 // Gong API Client
@@ -143,6 +210,28 @@ class GongClient {
       }
     });
   }
+
+  async retrieveCallDetails(args: GongRetrieveCallDetailsArgs): Promise<GongRetrieveCallDetailsResponse> {
+    // Validate at least one filter parameter
+    if (!args.callIds && !args.fromDateTime && !args.toDateTime && !args.primaryUserIds) {
+      throw new Error("At least one filter parameter is required");
+    }
+
+    const filter: any = {};
+    if (args.callIds) filter.callIds = args.callIds;
+    if (args.fromDateTime) filter.fromDateTime = args.fromDateTime;
+    if (args.toDateTime) filter.toDateTime = args.toDateTime;
+    if (args.primaryUserIds) filter.primaryUserIds = args.primaryUserIds;
+    if (args.cursor) filter.cursor = args.cursor;
+    
+    return this.request<GongRetrieveCallDetailsResponse>('POST', '/calls/extensive', undefined, {
+      filter,
+      contentSelector: {
+        // CRITICAL: 'Extended' context required for HubSpot CRM data (customer identification)
+        context: args.context || 'Extended'
+      }
+    });
+  }
 }
 
 const gongClient = new GongClient(GONG_ACCESS_KEY, GONG_ACCESS_SECRET);
@@ -182,6 +271,42 @@ const RETRIEVE_TRANSCRIPTS_TOOL: Tool = {
   }
 };
 
+const RETRIEVE_CALL_DETAILS_TOOL: Tool = {
+  name: "retrieve_call_details",
+  description: "Retrieve comprehensive call details including topics, trackers, speakers, interaction stats, and CRM data. Requires at least one filter parameter.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      callIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Array of call IDs to retrieve"
+      },
+      fromDateTime: {
+        type: "string",
+        description: "Start date/time in ISO format (e.g., '2024-03-01T00:00:00Z')"
+      },
+      toDateTime: {
+        type: "string",
+        description: "End date/time in ISO format (e.g., '2024-03-31T23:59:59Z')"
+      },
+      primaryUserIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Array of primary user IDs to filter by"
+      },
+      context: {
+        type: "string",
+        description: "Context level for data retrieval (default: 'Extended' for CRM data)"
+      },
+      cursor: {
+        type: "string",
+        description: "Cursor for pagination"
+      }
+    }
+  }
+};
+
 // Server implementation
 const server = new Server(
   {
@@ -215,9 +340,22 @@ function isGongRetrieveTranscriptsArgs(args: unknown): args is GongRetrieveTrans
   );
 }
 
+function isGongRetrieveCallDetailsArgs(args: unknown): args is GongRetrieveCallDetailsArgs {
+  if (typeof args !== "object" || args === null) return false;
+  const a = args as GongRetrieveCallDetailsArgs;
+  return (
+    (!a.callIds || (Array.isArray(a.callIds) && a.callIds.every(id => typeof id === "string"))) &&
+    (!a.fromDateTime || typeof a.fromDateTime === "string") &&
+    (!a.toDateTime || typeof a.toDateTime === "string") &&
+    (!a.primaryUserIds || (Array.isArray(a.primaryUserIds) && a.primaryUserIds.every(id => typeof id === "string"))) &&
+    (!a.context || typeof a.context === "string") &&
+    (!a.cursor || typeof a.cursor === "string")
+  );
+}
+
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [LIST_CALLS_TOOL, RETRIEVE_TRANSCRIPTS_TOOL],
+  tools: [LIST_CALLS_TOOL, RETRIEVE_TRANSCRIPTS_TOOL, RETRIEVE_CALL_DETAILS_TOOL],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name: string; arguments?: unknown } }) => {
@@ -250,6 +388,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         }
         const { callIds } = args;
         const response = await gongClient.retrieveTranscripts(callIds);
+        return {
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify(response, null, 2)
+          }],
+          isError: false,
+        };
+      }
+
+      case "retrieve_call_details": {
+        if (!isGongRetrieveCallDetailsArgs(args)) {
+          throw new Error("Invalid arguments for retrieve_call_details");
+        }
+        const response = await gongClient.retrieveCallDetails(args);
         return {
           content: [{ 
             type: "text", 
